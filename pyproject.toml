@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ivis"
+version = "0.1.0"
+description = "iVIS: turn natural-language dashboard requests into Power BI visual specs with a fine-tuned BERT model"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Fabian Msafiri" }]
+dependencies = []
+
+[project.optional-dependencies]
+model = ["torch>=2.3", "transformers>=4.40", "numpy>=1.24"]
+app = ["streamlit>=1.35", "altair>=5.0", "pandas>=2.0"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+ivis = "ivis.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ivis*"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
