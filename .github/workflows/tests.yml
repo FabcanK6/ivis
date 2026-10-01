@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "transformers>=4.40" numpy pytest ruff
+      - name: Lint
+        run: ruff check ivis tests
+      - name: Unit tests (includes tiny-BERT model tests)
+        run: pytest -q
+      - name: Rule baseline on a fresh dataset
+        run: |
+          python -m ivis.data.generate --out data --n-train 200 --n-val 50 --n-test 400
+          python -m ivis.evaluate --data data/test.jsonl --backend rules --errors 0
