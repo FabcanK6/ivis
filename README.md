@@ -1,6 +1,10 @@
 # iVIS: Intelligent Visualization Insight Synthesizer
 
 [![tests](https://github.com/FabcanK6/ivis/actions/workflows/tests.yml/badge.svg)](https://github.com/FabcanK6/ivis/actions/workflows/tests.yml)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ivis-fabcank6.streamlit.app)
+[![Model on Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Model-ivis--bert-yellow)](https://huggingface.co/FabcanK6/ivis-bert)
+
+**[▶ Try the live demo](https://ivis-fabcank6.streamlit.app)**
 
 **Turn plain-English dashboard requests into Power BI visual specs.**
 
