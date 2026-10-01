@@ -4,13 +4,11 @@
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ivis-fabcank6.streamlit.app)
 [![Model on Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Model-ivis--bert-yellow)](https://huggingface.co/FabcanK6/ivis-bert)
 
-**[▶ Try the live demo](https://ivis-fabcank6.streamlit.app)**
-
 **Turn plain-English dashboard requests into Power BI visual specs.**
 
-Clinical stakeholders tend to ask for dashboards in loose terms, for example *"Can we get a chart of top queries by site?"*, and a BI developer then has to work out the chart type, measure, axis, filters and date window. iVIS does that step automatically. A fine-tuned BERT model reads the request and returns a structured, Power BI-ready spec plus a DevOps work item.
+**[▶ Open the live app](https://ivis-fabcank6.streamlit.app)**
 
-iVIS is Phase 1 of **Project NOVAQ** (Narrative-to-Operational Value & Analytics Quotient), which turns unstructured clinical and operational narratives into structured outputs.
+Clinical stakeholders tend to ask for dashboards in loose terms, for example *"Can we get a chart of top queries by site?"*, and a BI developer then has to work out the chart type, measure, axis, filters and date window. iVIS does that step automatically. A fine-tuned BERT model reads the request and returns a structured, Power BI-ready spec plus a DevOps work item.
 
 ```text
 "Can we get a chart of the top 10 sites with the most open queries in Germany over the last 30 days?"
@@ -80,12 +78,15 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Try it immediately with the rule-based parser** (no training needed):
+**Run it:**
 
 ```bash
-python -m ivis.cli --backend rules "how many screen failures do we have at Site 104 since January?"
-python -m ivis.cli --backend rules --format devops "protocol deviations by country broken down by category in 2025"
+# web app: downloads the trained model from the Hugging Face Hub on first run
 streamlit run app/streamlit_app.py
+
+# command line (uses the BERT model in models/ivis-bert if present, otherwise the rule parser)
+python -m ivis.cli "how many screen failures do we have at Site 104 since January?"
+python -m ivis.cli --format devops "protocol deviations by country broken down by category in 2025"
 ```
 
 **Train the BERT model:**
@@ -107,7 +108,7 @@ python -m ivis.evaluate --data data/test.jsonl --backend rules
 
 If you don't have a GPU, open `notebooks/train_on_colab.ipynb` in Google Colab with a T4 runtime.
 
-Once `models/ivis-bert/` exists, both the CLI and the Streamlit app pick it up automatically. To use a different directory, set `IVIS_MODEL_DIR`.
+Once `models/ivis-bert/` exists, both the CLI and the Streamlit app pick it up automatically. To use a different directory, set `IVIS_MODEL_DIR`; to pull a different checkpoint from the Hugging Face Hub, set `IVIS_HF_MODEL`.
 
 ### Other encoders
 
@@ -172,6 +173,7 @@ Test set: 2,000 requests. Half use phrasings seen during training; the other hal
 **Next improvements:** more varied phrasing in the generator, fixing label inconsistencies, falling back to rule-based chart cues when BERT is unsure, and evaluating on real stakeholder requests.
 
 > Synthetic data overstates real-world accuracy. Before relying on these numbers, evaluate on a small hand-labelled set of real requests.
+
 ---
 
 ## Output spec
@@ -238,9 +240,11 @@ ivis/
 │   ├── rules.py           # keyword baseline
 │   └── cli.py             # `python -m ivis.cli "..."`
 ├── app/streamlit_app.py   # UI: preview with mock data, spec JSON, DevOps ticket, span highlighting
+├── .streamlit/config.toml # app settings
 ├── notebooks/train_on_colab.ipynb
 ├── scripts/train_bert.sh
 ├── tests/                 # unittest/pytest; model tests build a tiny random BERT (no download)
+├── docs/                  # README screenshots
 └── data/sample.jsonl
 ```
 
@@ -248,15 +252,25 @@ Run the tests with `pytest` or `python -m unittest discover -s tests`.
 
 ---
 
-## Roadmap (Project NOVAQ)
+## Deployment
 
-- [x] **iVIS:** Narrative-to-Spec (this repo)
-- [ ] Feedback capture in the app → corrected examples appended to training data
+| | |
+|---|---|
+| Live app | [ivis-fabcank6.streamlit.app](https://ivis-fabcank6.streamlit.app) on Streamlit Community Cloud; redeploys on every push to `main` |
+| Model | [FabcanK6/ivis-bert](https://huggingface.co/FabcanK6/ivis-bert) on the Hugging Face Hub, downloaded by the app on cold start |
+| CI | GitHub Actions: lint, unit tests and a baseline evaluation on every push |
+| Fallback | If the model can't be loaded, the app serves the rule-based parser and shows which parser answered |
+
+---
+
+## Roadmap
+
+- [ ] Evaluate on a hand-labelled set of real requests
+- [ ] More varied phrasing and consistent labels in the generator
+- [ ] Hybrid parser: keyword rules can override BERT's chart choice; calibrated confidence
+- [ ] Optional LLM mode, compared with BERT on the same test set
+- [ ] Feedback capture in the app → corrected specs become training data
 - [ ] Generate Power BI report JSON (PBIR `visual.json`) directly from the spec
-- [ ] LLM fallback for low-confidence requests
-- [ ] **SCOPE:** Narrative-to-Insight (risk extraction from SRM visit notes)
-- [ ] Narrative-to-SQL
-- [ ] Narrative-to-Audit
 
 ## License
 
