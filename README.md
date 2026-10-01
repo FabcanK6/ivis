@@ -127,17 +127,29 @@ Each row looks like this:
 
 ## Results
 
-Test set: 2,000 requests, half of them from held-out templates.
+Test set: 2,000 requests. Half use phrasings seen during training; the other half come from 10 held-out templates the model never saw.
 
-| Parser | Chart-type acc. | Slot micro-F1 | Exact frame match | Unseen-template chart acc. |
+| Parser | Chart-type acc. | Slot micro-F1 | Exact frame match | Unseen phrasing (chart acc. / slot F1) |
 |---|---|---|---|---|
-| Rule baseline (`ivis/rules.py`) | 0.946 | 0.897 | 0.600 | 0.956 |
-| BERT (`bert-base-uncased`) | *run `scripts/train_bert.sh`* | | | |
+| Rule baseline (`ivis/rules.py`) | **0.946** | 0.897 | 0.600 | **0.956** / 0.909 |
+| BERT (`bert-base-uncased`, 4 epochs, Colab T4) | 0.926 | **0.954** | **0.796** | 0.853 / 0.906 |
 
-*Exact frame match* means the chart type and every slot tag are correct. The rule baseline does well on chart type because it shares the generator's vocabulary. It struggles to tell the axis (`GROUP_BY`) apart from the legend (`SERIES`), with aggregation words used in other senses, and with time phrases it hasn't seen. Those are the cases the BERT model is meant to fix. Add your BERT numbers to this table after training.
+*Exact frame match* means the chart type and every slot tag are correct.
+
+| Slot F1 | AGG | FILTER | GROUP_BY | METRIC | SERIES | SORT | TIME | TOPN |
+|---|---|---|---|---|---|---|---|---|
+| Rules | 0.829 | 0.959 | 0.860 | 0.998 | 0.623 | 0.821 | 0.873 | 1.000 |
+| BERT | 0.886 | 1.000 | 0.898 | 0.996 | 0.801 | 1.000 | 0.999 | 1.000 |
+
+**What this shows**
+
+- **BERT is much better at pulling out the details.** Exact frame match rises from 60% to 80%. The biggest gains are in telling the axis apart from the legend (SERIES 0.62 → 0.80), time windows (0.87 → 1.00) and sort order (0.82 → 1.00).
+- **BERT partly memorizes phrasing.** It is near perfect on familiar wording (chart acc. 0.999, slot F1 1.000) but drops to 0.853 chart accuracy on unseen wording, below the rule baseline. Most of those misses are stacked bars ("X per Y split by Z" read as a plain bar, 0.48) and cards (0.85).
+- **Some errors come from the labels, not the model.** For example, "total" is tagged as an aggregation in some templates but not in "contribution to total", and "over time" is never tagged as a time axis.
+
+**Next improvements:** more varied phrasing in the generator, fixing label inconsistencies, falling back to rule-based chart cues when BERT is unsure, and evaluating on real stakeholder requests.
 
 > Synthetic data overstates real-world accuracy. Before relying on these numbers, evaluate on a small hand-labelled set of real requests.
-
 ---
 
 ## Output spec
