@@ -99,9 +99,7 @@ class RuleParser:
                     label = "TIME"
                 elif _TOPN_RE.match(chunk):
                     label = "TOPN"
-                elif k <= 2 and re.match(r"^site\s*#?\s*\d+$", chunk):
-                    label = "FILTER"
-                elif k == 1 and re.match(r"^[a-z]{2,5}-\d{2,4}$", chunk):
+                elif k <= 2 and re.match(r"^site\s*#?\s*\d+$", chunk) or k == 1 and re.match(r"^[a-z]{2,5}-\d{2,4}$", chunk):
                     label = "FILTER"
                 if label:
                     start = i + 1 if label == "TIME" and low[i] == "in" else i

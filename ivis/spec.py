@@ -124,7 +124,7 @@ def build_spec(
     measures: list[dict] = []
     group_by: list[dict] = []
     series: list[dict] = []
-    filters: "OrderedDict[str, dict]" = OrderedDict()
+    filters: OrderedDict[str, dict] = OrderedDict()
     time_filter = None
     top_n = None
     sort_dir = None

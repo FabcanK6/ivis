@@ -39,7 +39,7 @@ class IvisJointModel(nn.Module):
         self._accepts_token_types = "token_type_ids" in inspect.signature(encoder.forward).parameters
 
     @classmethod
-    def from_encoder_name(cls, name: str, **kwargs) -> "IvisJointModel":
+    def from_encoder_name(cls, name: str, **kwargs) -> IvisJointModel:
         encoder = AutoModel.from_pretrained(name)
         return cls(encoder, num_charts=len(CHART_TYPES), num_labels=len(BIO_LABELS), **kwargs)
 
