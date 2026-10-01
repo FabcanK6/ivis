@@ -24,6 +24,8 @@ from ivis.predict import RuleBasedParser, load_parser  # noqa: E402
 from ivis.text import words  # noqa: E402
 
 MODEL_DIR = os.environ.get("IVIS_MODEL_DIR", "models/ivis-bert")
+# Public Hugging Face repo with the trained checkpoint; downloaded on first run if MODEL_DIR is empty.
+HF_MODEL_REPO = os.environ.get("IVIS_HF_MODEL", "FabcanK6/ivis-bert")
 EXAMPLES = [
     "Can we get a chart of top 10 sites with the most open queries in Germany last 30 days?",
     "Trend of SAEs by month for ONC-301 this year",
@@ -37,6 +39,22 @@ EXAMPLES = [
 ]
 
 st.set_page_config(page_title="iVIS - Visualization Intent Engine", page_icon="📊", layout="wide")
+
+
+@st.cache_resource(show_spinner="Downloading the iVIS BERT model (first run only)...")
+def ensure_model() -> bool:
+    """Make sure a checkpoint exists locally, fetching it from the Hugging Face Hub if needed."""
+    if (Path(MODEL_DIR) / "ivis_model.pt").exists():
+        return True
+    if not HF_MODEL_REPO:
+        return False
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(HF_MODEL_REPO, local_dir=MODEL_DIR)
+    except Exception as exc:  # network issues, missing repo, ...
+        st.sidebar.warning(f"Could not download `{HF_MODEL_REPO}`: {exc}")
+    return (Path(MODEL_DIR) / "ivis_model.pt").exists()
 
 
 @st.cache_resource
@@ -99,10 +117,10 @@ def preview(spec: dict):
     if ct in ("table", "map"):
         if ct == "map":
             st.caption("Map preview is shown as a table; the spec targets a filled map in Power BI.")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         return
     if ct == "matrix" and s:
-        st.dataframe(df.pivot_table(index=g, columns=s, values=m, aggfunc="sum"), use_container_width=True)
+        st.dataframe(df.pivot_table(index=g, columns=s, values=m, aggfunc="sum"), width="stretch")
         return
     if ct in ("pie", "donut"):
         chart = alt.Chart(df).mark_arc(innerRadius=60 if ct == "donut" else 0).encode(
@@ -116,7 +134,7 @@ def preview(spec: dict):
     else:
         chart = alt.Chart(df).mark_bar().encode(
             y=alt.Y(f"{g}:N", sort=order if not s else None), x=f"{m}:Q", color=color)
-    st.altair_chart(chart.properties(height=360, title=spec["title"]), use_container_width=True)
+    st.altair_chart(chart.properties(height=360, title=spec["title"]), width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -124,14 +142,14 @@ st.title("📊 iVIS")
 st.caption("Intelligent Visualization Insight Synthesizer · turn plain-English dashboard requests into Power BI specs")
 
 with st.sidebar:
-    has_model = (Path(MODEL_DIR) / "ivis_model.pt").exists()
+    has_model = ensure_model()
     backend = st.radio("Parser", ["bert", "rules"], index=0 if has_model else 1,
                        help="'bert' needs a trained checkpoint (python -m ivis.train).")
     if backend == "bert" and not has_model:
         st.warning(f"No checkpoint at `{MODEL_DIR}`, so the rule-based parser is used instead.")
     st.markdown("**Examples**")
     for ex in EXAMPLES:
-        if st.button(ex, use_container_width=True):
+        if st.button(ex, width="stretch"):
             st.session_state["request"] = ex
 
 text = st.text_area("Stakeholder request", key="request", height=90,
