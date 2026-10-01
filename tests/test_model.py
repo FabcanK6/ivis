@@ -27,7 +27,7 @@ class TestJointModel(unittest.TestCase):
         for d in DIMENSIONS:
             for s in d.synonyms + d.values:
                 vocab.update(w.lower() for w in words(s))
-        vocab.update("top 10 by in the of for last 30 days show chart".split())
+        vocab.update(["top", "10", "by", "in", "the", "of", "for", "last", "30", "days", "show", "chart"])
         self.tmp = tempfile.TemporaryDirectory()
         vocab_file = f"{self.tmp.name}/vocab.txt"
         with open(vocab_file, "w") as f:
@@ -59,7 +59,7 @@ class TestJointModel(unittest.TestCase):
         from ivis.predict import BertParser
         d = f"{self.tmp.name}/ckpt"
         self.model.save(d, self.tokenizer, base_model="tiny-test", max_length=32)
-        model, tok, cfg = IvisJointModel.load(d)
+        _model, _tok, cfg = IvisJointModel.load(d)
         self.assertEqual(cfg["base_model"], "tiny-test")
         spec = BertParser(d, device="cpu").parse("top 10 sites by open queries in Germany")
         self.assertIn("powerbi_visual", spec)
