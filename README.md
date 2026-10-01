@@ -19,6 +19,24 @@ iVIS is Phase 1 of **Project NOVAQ** (Narrative-to-Operational Value & Analytics
 
 ---
 
+## Demo
+
+**Request:** *"Trend of SAEs by month for ONC-301 this year"*
+
+BERT tags each part of the request:
+
+![Detected spans](docs/app-spans.png)
+
+and iVIS turns it into a Power BI line chart spec (preview uses mock data):
+
+![Line chart preview](docs/app-preview.png)
+
+plus a ready-to-file DevOps ticket:
+
+![DevOps ticket](docs/app-ticket.png)
+
+---
+
 ## How it works
 
 ```mermaid
