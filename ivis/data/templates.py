@@ -76,7 +76,7 @@ TEMPLATES: dict[str, list[str]] = {
         "proportion of {metric_bare} by {group} {?filter} {?time}",
         "distribution of {metric_bare} across {group} as percentages {?filter} {?time}",
         "how are {metric_bare} split between {group} {?filter} {?time} ?",
-        "{group} contribution to total {metric_bare} {?filter} {?time}",
+        "{group} contribution to {AGG=total} {metric_bare} {?filter} {?time}",
     ],
     "donut": [
         "donut chart of {metric} by {group} {?filter} {?time}",

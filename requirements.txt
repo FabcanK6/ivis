@@ -10,3 +10,5 @@ huggingface_hub>=0.30
 streamlit>=1.50
 altair>=5.0
 pandas>=2.0
+# Keep a user's own data model in their browser between visits
+streamlit-js-eval>=1.0

@@ -38,8 +38,43 @@ CHART_RULES: list[tuple[str, list[str]]] = [
               "monitor", "over the"]),
 ]
 
+# Cues that name the chart, or a layout only one chart has ("split by" = a legend = stacked bars). When one of these
+# is in the request, the hybrid reader trusts it over BERT. Each one was checked on the validation split: none is
+# below 0.97 precision where it occurs (weak cues such as "how many", "percentage", "against" or "monitor" are left
+# out, because they also appear in requests for other charts).
+STRONG_CUES: dict[str, list[str]] = {
+    "matrix": ["matrix", "crosstab", "cross tab", "heatmap", "heat map", "pivot", "as rows"],
+    "map": [" map", "where in the world"],
+    "donut": ["donut", "doughnut", "ring chart"],
+    "scatter": [" vs ", "versus", "correlation", "relationship between", "scatter"],
+    "pie": ["pie", "share of", "proportion", "split between", "contribution"],
+    "area": ["cumulative", "running total", "area chart"],
+    "stacked_bar": ["stacked", "broken down by", "split by", "legend", "segmented", "composition", "break down"],
+    "table": ["table", "listing", "list of", "list them"],
+    "card": ["kpi", "single number", "headline"],
+    "line": ["trend", "week over week"],
+}
 
-def _build_lexicon() -> list[tuple[tuple[str, ...], str, object]]:
+
+def chart_cue(text: str) -> tuple[str | None, str | None, bool]:
+    """The chart a request's wording points to: (chart type, cue, whether it is a strong cue).
+
+    A strong cue anywhere in the request wins ("stacked bar ... by geography" is a stacked bar, even though
+    "geograph" is also a map cue); otherwise the first cue in ``CHART_RULES`` order, as the keyword reader uses."""
+    t = " " + text.lower() + " "
+    for chart, cues in CHART_RULES:
+        for c in STRONG_CUES.get(chart, []):
+            if c in t:
+                return chart, c.strip(), True
+    for chart, cues in CHART_RULES:
+        for c in cues:
+            if c in t:
+                return chart, c.strip(), False
+    return None, None, False
+
+
+def _build_lexicon(cat: catalog.Catalog | None = None) -> list[tuple[tuple[str, ...], str, object]]:
+    cat = cat or catalog.DEFAULT
     lex: list[tuple[tuple[str, ...], str, object]] = []
 
     def add(phrase: str, label: str, payload=None):
@@ -47,10 +82,10 @@ def _build_lexicon() -> list[tuple[tuple[str, ...], str, object]]:
         if toks:
             lex.append((toks, label, payload))
 
-    for m in catalog.MEASURES:
-        for s in m.synonyms + [m.display]:
+    for m in cat.measures:
+        for s in [*m.synonyms, m.display]:
             add(s, "METRIC", m)
-    for d in catalog.DIMENSIONS:
+    for d in cat.dimensions:
         for s in d.synonyms:
             add(s, "DIM", d)
         for v in d.values:
@@ -72,12 +107,16 @@ _LEXICON = _build_lexicon()
 class RuleParser:
     name = "rules"
 
+    def __init__(self, cat: catalog.Catalog | None = None):
+        self.cat = cat or catalog.DEFAULT
+        self.lexicon = _LEXICON if self.cat is catalog.DEFAULT else _build_lexicon(self.cat)
+
     def classify(self, text: str, spans: list[Span]) -> tuple[str, float]:
         t = " " + text.lower() + " "
         for chart, cues in CHART_RULES:
             if any(c in t for c in cues):
                 return chart, 0.6
-        groups = [catalog.resolve_dimension(s.text) for s in spans if s.label == "GROUP_BY"]
+        groups = [self.cat.resolve_dimension(s.text) for s in spans if s.label == "GROUP_BY"]
         if any(g and g.is_time for g in groups):
             return "line", 0.6
         if not groups:
@@ -99,7 +138,9 @@ class RuleParser:
                     label = "TIME"
                 elif _TOPN_RE.match(chunk):
                     label = "TOPN"
-                elif k <= 2 and re.match(r"^site\s*#?\s*\d+$", chunk) or k == 1 and re.match(r"^[a-z]{2,5}-\d{2,4}$", chunk):
+                elif (k <= 2 and re.match(r"^site\s*#?\s*\d+$", chunk)) or (
+                    k == 1 and re.match(r"^[a-z]{2,5}-\d{2,4}$", chunk)
+                ):
                     label = "FILTER"
                 if label:
                     start = i + 1 if label == "TIME" and low[i] == "in" else i
@@ -109,7 +150,7 @@ class RuleParser:
                     break
             if matched:
                 continue
-            for phrase, label, payload in _LEXICON:
+            for phrase, label, payload in self.lexicon:
                 k = len(phrase)
                 if tuple(low[i:i + k]) == phrase:
                     if label == "DIM":

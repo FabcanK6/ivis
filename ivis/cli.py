@@ -19,17 +19,32 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("text", nargs="+", help="request text, or '-' to read lines from stdin")
     ap.add_argument("--model", default="models/ivis-bert", help="checkpoint dir (falls back to rules if missing)")
-    ap.add_argument("--backend", choices=["auto", "rules"], default="auto")
-    ap.add_argument("--format", choices=["spec", "devops", "devops-json", "markdown"], default="spec")
+    ap.add_argument("--backend", choices=["auto", "bert", "rules", "ai"], default="auto",
+                    help="auto = BERT + keyword cues (keywords only if there is no model); ai needs GEMINI_API_KEY")
+    ap.add_argument("--format", choices=["spec", "devops", "devops-json", "markdown", "visual"], default="spec",
+                    help="visual = a Power BI (PBIR) visual.json")
     args = ap.parse_args(argv)
 
-    parser = load_parser(None if args.backend == "rules" else args.model)
+    if args.backend == "ai":
+        from ivis.ai import AIParser
+        from ivis.llm import GeminiClient, get_api_key
+
+        parser = AIParser(GeminiClient(get_api_key() or ""))
+    else:
+        parser = load_parser(None if args.backend == "rules" else args.model, hybrid=args.backend == "auto")
     print(f"[iVIS backend: {parser.name}]", file=sys.stderr)
     texts = [line.strip() for line in sys.stdin if line.strip()] if args.text == ["-"] else [" ".join(args.text)]
     for text in texts:
         spec = parser.parse(text)
         if args.format == "spec":
             print(json.dumps(spec, indent=2, ensure_ascii=False))
+        elif args.format == "visual":
+            from ivis.pbir import to_visual_json
+
+            visual, notes = to_visual_json(spec)
+            print(json.dumps(visual, indent=2, ensure_ascii=False))
+            for n in notes:
+                print(f"note: {n}", file=sys.stderr)
         elif args.format == "devops-json":
             print(json.dumps(to_json_patch(spec), indent=2, ensure_ascii=False))
         else:

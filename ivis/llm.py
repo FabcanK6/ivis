@@ -1,0 +1,316 @@
+"""Gemini API client for iVIS's AI reading mode (free tier friendly, standard library only).
+
+The API key comes from the ``GEMINI_API_KEY`` environment variable or Streamlit secrets. Nothing runs unless a key
+is configured. The client tries the newest Flash models in turn: a busy model is retried, a slow one or one out of
+quota is skipped, and a model whose free daily quota is spent is skipped for everyone until midnight Pacific.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import time
+import urllib.error
+import urllib.request
+from typing import ClassVar
+
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "")
+# Gemini 3 models think before answering; reading a short request needs little thinking, so "low" keeps answers
+# fast. Override with GEMINI_THINKING (low / medium / high).
+THINKING_LEVEL = os.environ.get("GEMINI_THINKING", "low")
+# a reading is a few hundred tokens; a model stuck in a loop stops here
+MAX_OUTPUT_TOKENS = 4096
+
+
+BUSY_MESSAGE = ("Gemini is busy right now (Google's free tier is under high demand). "
+                "Please try again in a minute.")
+
+
+class LLMError(Exception):
+    """A user-facing error message (quota reached, bad key, network problem...)."""
+
+
+class ModelNotFound(LLMError):
+    """This model can't be used with this key; try another one."""
+
+
+class QuotaExceeded(LLMError):
+    """This model's free quota is used up (per minute or per day); other models have their own quota."""
+
+    def __init__(self, detail: str = ""):
+        super().__init__(detail)
+        self.per_day = bool(re.search(r"PerDay", detail))
+        m = re.search(r'"retryDelay":\s*"(\d+)', detail)
+        self.retry_seconds = int(m.group(1)) if m else None
+
+
+def quota_message(e: QuotaExceeded) -> str:
+    if e.per_day:
+        return ("Today's free Gemini quota is used up for every model iVIS can use. It resets at midnight Pacific "
+                "time. Requests already read today still open from the cache, and the BERT and keyword readers "
+                "still work.")
+    wait = f"about {e.retry_seconds} seconds" if e.retry_seconds else "a minute"
+    return f"Gemini's free per-minute limit was reached. Wait {wait} and try again."
+
+
+class BadAnswer(LLMError):
+    """The model answered, but not with usable JSON. ``raw`` keeps the answer for diagnosis."""
+
+    def __init__(self, message: str, raw: str = ""):
+        super().__init__(message)
+        self.raw = raw
+
+
+class ModelBusy(LLMError):
+    """Temporary overload (HTTP 500/502/503/504 or a timeout); retry, then try another model."""
+
+
+class ModelSlow(ModelBusy):
+    """The model did not answer within the timeout: go straight to the next model (waiting again rarely helps)."""
+
+
+# ---------------------------------------------------------------------------
+# Gemini REST client (standard library only)
+# ---------------------------------------------------------------------------
+class LLMClient:
+    """What iVIS needs from an LLM provider: ``generate`` (text, optionally constrained to a JSON schema) plus a
+    ``model`` name."""
+
+    provider = "LLM"
+    model: str | None = None
+
+    def __init__(self) -> None:
+        self.avoid: set[str] = set()  # models that just gave a bad answer (used by providers with several models)
+        self.trail: list[str] = []  # what happened on each try, e.g. "gemini-3.8-flash: timed out after 60 s"
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider} {self.model or ''}".strip()
+
+    def generate(self, system: str, prompt: str, schema: dict | None = None) -> str:  # pragma: no cover
+        raise NotImplementedError
+
+    def generate_json(self, system: str, prompt: str, schema: dict) -> dict:
+        raw = self.generate(system, prompt, schema)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            try:
+                if m:
+                    return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+            raise BadAnswer("Gemini did not return valid JSON.", raw) from None
+
+
+class GeminiClient(LLMClient):
+    provider = "Google Gemini"
+    retry_delays = (2.0, 5.0)  # waits before the 2nd and 3rd attempt on a busy model
+    max_models = 6  # how many models to try before giving up
+    time_budget = 150.0  # seconds: stop trying further models after this, so nobody waits for many minutes
+    # models whose free daily quota is used up, shared by every session of the app: key -> wall-clock time it resets
+    _exhausted: ClassVar[dict[str, float]] = {}
+    slow_for = 600.0  # seconds a model that timed out is tried last
+
+    def __init__(self, api_key: str, model: str | None = None, timeout: int = 60):
+        super().__init__()
+        if not api_key:
+            raise LLMError("No Gemini API key configured.")
+        self.api_key = api_key
+        self.preferred = model or DEFAULT_MODEL or None  # pinned via GEMINI_MODEL, tried first
+        self.model = self.preferred  # the last model that answered
+        self.timeout = timeout
+        self._listed: list[str] | None = None
+        self._sleep = time.sleep
+        self._clock = time.monotonic
+        self._slow: dict[str, float] = {}  # model -> when it last timed out
+        self._no_thinking: set[str] = set()  # models that refused thinkingConfig
+
+    # -- transport (patched in tests) -------------------------------------
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        req = urllib.request.Request(
+            f"{GEMINI_BASE}/{path}", method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:3000]
+            if e.code == 429 and re.search(r"limit:\s*0\b", detail):
+                raise ModelNotFound(f"model not available on this tier: {detail}") from e  # try another model
+            if e.code == 429:
+                raise QuotaExceeded(detail) from e  # try another model: free quotas are per model
+            if e.code in (401, 403):
+                raise LLMError("The Gemini API key was rejected. Check the key in the app settings.") from e
+            if e.code == 404:
+                raise ModelNotFound(detail) from e
+            if e.code in (500, 502, 503, 504):
+                raise ModelBusy(f"HTTP {e.code}") from e
+            raise LLMError(f"Gemini API error {e.code}: {_message(detail)}") from e
+        except TimeoutError as e:
+            raise ModelSlow("timeout") from e
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, TimeoutError):
+                raise ModelSlow("timeout") from e
+            raise LLMError(f"Could not reach the Gemini API ({e.reason}).") from e
+
+    # -- model selection --------------------------------------------------
+    def list_models(self) -> list[str]:
+        data = self._request("GET", "models?pageSize=200")
+        names = []
+        for m in data.get("models", []):
+            name = m.get("name", "").removeprefix("models/")
+            if "generateContent" not in m.get("supportedGenerationMethods", []):
+                continue
+            if "flash" in name and not re.search(r"tts|image|live|audio|embed|thinking|exp", name):
+                names.append(name)
+
+        def key(n: str):
+            version = [int(x) for x in re.findall(r"\d+", n)[:2]] or [0]
+            return (0 if "preview" in n else 1, version, 0 if "lite" in n else 1)
+
+        return sorted(names, key=key, reverse=True)
+
+    def candidates(self) -> list[str]:
+        """Last working model, then the pinned one, then the newest available flash models."""
+        if self._listed is None:
+            try:
+                self._listed = self.list_models()
+            except ModelBusy:
+                self._listed = []
+        order = list(dict.fromkeys(m for m in [self.model, self.preferred, *self._listed, "gemini-flash-latest"] if m))
+        now = self._clock()
+        slow = {m for m, t in self._slow.items() if now - t < self.slow_for}
+        later = self.avoid | slow
+        spent = {m for m in order if self._exhausted.get(self._quota_key(m), 0) > time.time()}
+        order = ([m for m in order if m not in later | spent] + [m for m in order if m in later - spent]
+                 + [m for m in order if m in spent])  # a model out of quota today is only tried as a last resort
+        return order[: self.max_models]
+
+    def _quota_key(self, model: str) -> str:
+        return f"{hashlib.sha256(self.api_key.encode()).hexdigest()[:12]}:{model}"
+
+    def _body_for(self, model: str, body: dict) -> dict:
+        """Gemini 3 models get a low thinking level (see THINKING_LEVEL); older models keep their defaults."""
+        if not re.match(r"gemini-([3-9]|\d\d)", model) or model in self._no_thinking or not THINKING_LEVEL:
+            return body
+        config = {**body["generationConfig"], "thinkingConfig": {"thinkingLevel": THINKING_LEVEL}}
+        return {**body, "generationConfig": config}
+
+    # -- generation -------------------------------------------------------
+    def generate(self, system: str, prompt: str, schema: dict | None = None) -> str:
+        # No temperature: Google advises keeping Gemini 3 models at their default, because a low temperature can
+        # cause looping and degraded answers (and newer Flash models ignore it).
+        body = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS},
+        }
+        if schema is not None:
+            body["generationConfig"].update(responseMimeType="application/json", responseSchema=schema)
+        last = None
+        started = self._clock()
+        for model in self.candidates():
+            if last is not None and self._clock() - started > self.time_budget:
+                break  # tried long enough: say so instead of keeping the user waiting
+            t0 = self._clock()
+            try:
+                try:
+                    data = self._call_with_retry(f"models/{model}:generateContent", self._body_for(model, body))
+                except LLMError as e:
+                    if "thinking" not in str(e).lower() or model in self._no_thinking:
+                        raise
+                    self._no_thinking.add(model)  # this model does not take a thinking level: ask without it
+                    data = self._call_with_retry(f"models/{model}:generateContent", body)
+            except (ModelNotFound, ModelBusy, QuotaExceeded) as e:
+                self.trail.append(f"{model}: {_outcome(e)} after {self._clock() - t0:.0f} s")
+                if isinstance(e, ModelSlow):
+                    self._slow[model] = self._clock()
+                if isinstance(e, QuotaExceeded) and e.per_day:
+                    GeminiClient._exhausted[self._quota_key(model)] = next_quota_reset()
+                if not isinstance(last, QuotaExceeded):  # report the quota problem if any model hit it
+                    last = e
+                continue
+            except LLMError as e:
+                self.trail.append(f"{model}: error after {self._clock() - t0:.0f} s ({str(e)[:120]})")
+                raise
+            self.trail.append(f"{model}: answered in {self._clock() - t0:.0f} s")
+            self.model = model  # remember the model that worked
+            try:
+                return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+            except (KeyError, IndexError) as e:
+                reason = data.get("promptFeedback", {}).get("blockReason") or "empty response"
+                raise LLMError(f"Gemini returned no text ({reason}).") from e
+        if isinstance(last, QuotaExceeded):
+            raise LLMError(quota_message(last))
+        if isinstance(last, ModelBusy):
+            raise LLMError(BUSY_MESSAGE)
+        raise LLMError(f"No usable Gemini model found ({last}).")
+
+    def _call_with_retry(self, path: str, body: dict) -> dict:
+        """Busy models get two more tries after a short wait; a timeout moves on at once."""
+        for delay in (*self.retry_delays, None):
+            try:
+                return self._request("POST", path, body)
+            except ModelBusy as e:
+                if delay is None or isinstance(e, ModelSlow):
+                    raise
+                self._sleep(delay)
+        raise AssertionError("unreachable")
+
+
+
+# ---------------------------------------------------------------------------
+# Second opinion
+# ---------------------------------------------------------------------------
+
+
+def next_quota_reset(now: float | None = None) -> float:
+    """Gemini's free daily quotas reset at midnight Pacific time: the next one, as a timestamp."""
+    import datetime as dt
+
+    now = time.time() if now is None else now
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("America/Los_Angeles")
+    except (ImportError, KeyError, ValueError):  # no time zone data: Pacific standard time is close enough
+        tz = dt.timezone(dt.timedelta(hours=-8))
+    local = dt.datetime.fromtimestamp(now, tz)
+    midnight = (local + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.timestamp()
+
+
+def _outcome(e: Exception) -> str:
+    if isinstance(e, ModelSlow):
+        return "timed out"
+    if isinstance(e, QuotaExceeded):
+        return "daily free quota used up" if e.per_day else "per-minute limit reached"
+    if isinstance(e, ModelNotFound):
+        return "not available with this key"
+    return f"busy ({e})"
+
+
+def _message(detail: str) -> str:
+    """The human-readable part of a Gemini error body (falls back to the raw text)."""
+    try:
+        return json.loads(detail)["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        return detail
+
+
+def get_api_key(secrets=None) -> str | None:
+    """Environment variable first, then Streamlit secrets (if given)."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key and secrets is not None:
+        try:
+            key = secrets.get("GEMINI_API_KEY")
+        except Exception:  # noqa: BLE001 - Streamlit raises its own error when there is no secrets file
+            key = None
+    return key or None

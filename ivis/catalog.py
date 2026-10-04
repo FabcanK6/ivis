@@ -2,8 +2,10 @@
 
 The model only learns *where* a measure, dimension, or filter is mentioned.
 This catalog maps those spans to concrete Power BI fields ("Table[Column]").
-Swap these entries for your own dataset's tables and columns; the generator
-uses the same synonyms to build training data, so retrain after editing.
+The built-in catalog below is a clinical-operations model. Users can bring their own data model in the
+app (a table of measures and columns, see :class:`Catalog` and :func:`Catalog.from_rows`); the spec builder, the
+keyword parser and the AI reader all work against whichever catalog is active. The BERT model was trained on the
+built-in catalog's synonyms, so it finds the parts of a request best when the wording is similar.
 """
 
 from __future__ import annotations
@@ -125,12 +127,18 @@ SORT_WORDS: dict[str, list[str]] = {
     "asc": ["lowest", "fewest", "least", "smallest", "best", "ascending", "slowest"],
 }
 
-DATE_FIELD = "Date[Date]"
+DATE_FIELD = "Date[Date]"  # the built-in catalog's date column (relative date filters)
 
 
 # ---------------------------------------------------------------------------
 # Lookup helpers
 # ---------------------------------------------------------------------------
+FIELD_RE = re.compile(r"^\s*'?([^\[\]']+?)'?\s*\[\s*([^\[\]]+?)\s*\]\s*$")
+TIME_WORDS = {"day": ["daily"], "date": ["daily"], "week": ["weekly"], "month": ["monthly"], "quarter": ["quarterly"],
+              "year": ["yearly", "annual"]}
+_STEM_SUFFIXES = (" name", " count", " number", " id", " code", " #", " amount", " total", " value")
+
+
 def _norm(s: str) -> str:
     s = s.lower().strip()
     s = re.sub(r"[^\w%#\- ]", "", s)
@@ -146,21 +154,203 @@ def _singular(s: str) -> str:
     return s
 
 
-_MEASURE_INDEX: dict[str, Measure] = {}
-for _m in MEASURES:
-    for _syn in [_m.display, _m.key, *_m.synonyms]:
-        _MEASURE_INDEX[_norm(_syn)] = _m
+def _plural(s: str) -> str:
+    if s.endswith("y") and len(s) > 2 and s[-2] not in "aeiou":
+        return s[:-1] + "ies"
+    return s if s.endswith("s") else s + "s"
 
-_DIM_INDEX: dict[str, Dimension] = {}
-_VALUE_INDEX: dict[str, Dimension] = {}
-for _d in DIMENSIONS:
-    for _syn in [_d.display, _d.key, *_d.synonyms]:
-        _DIM_INDEX[_norm(_syn)] = _d
-    for _v in _d.values:
-        _VALUE_INDEX[_norm(_v)] = _d
 
-DIM_BY_KEY = {d.key: d for d in DIMENSIONS}
-MEASURE_BY_KEY = {m.key: m for m in MEASURES}
+def split_field(field: str) -> tuple[str, str] | None:
+    """``"Site[Site Name]"`` -> ``("Site", "Site Name")``; None if it is not in Table[Column] form."""
+    m = FIELD_RE.match(field or "")
+    return (m.group(1).strip(), m.group(2).strip()) if m else None
+
+
+def auto_synonyms(name: str, is_time: bool = False) -> list[str]:
+    """Words people are likely to use for a field, from its name: "Site Name" -> site name, site names, site, sites."""
+    n = _norm(name)
+    out = [n, _plural(n)]
+    for suf in _STEM_SUFFIXES:
+        if n.endswith(suf) and len(n) > len(suf) + 1:
+            stem = n[: -len(suf)].strip()
+            out += [stem, _plural(_singular(stem))]
+    if is_time:
+        out += TIME_WORDS.get(_singular(n), [])
+    return [x for x in dict.fromkeys(out) if x]
+
+
+class Catalog:
+    """A data model iVIS maps requests onto: measures, dimensions (with example values) and a date column."""
+
+    def __init__(self, measures: list[Measure], dimensions: list[Dimension],
+                 name: str = "Clinical operations (built-in)", date_field: str | None = None):
+        self.name = name
+        self.measures = list(measures)
+        self.dimensions = list(dimensions)
+        times = [d for d in self.dimensions if d.is_time]
+        self.date_field = date_field or next((d.field for d in times if _norm(d.display) in ("date", "day")),
+                                             times[0].field if times else None)
+        self.measure_index: dict[str, Measure] = {}
+        for m in self.measures:
+            for syn in [m.display, m.key, *m.synonyms]:
+                self.measure_index[_norm(syn)] = m
+        self.dim_index: dict[str, Dimension] = {}
+        self.value_index: dict[str, Dimension] = {}
+        for d in self.dimensions:
+            for syn in [d.display, d.key, *d.synonyms]:
+                self.dim_index[_norm(syn)] = d
+            for v in d.values:
+                self.value_index[_norm(v)] = d
+        self.by_field = {x.field: x for x in [*self.measures, *self.dimensions]}
+
+    # -- lookups ----------------------------------------------------------
+    def measure_by_field(self, field: str | None) -> Measure | None:
+        x = self.by_field.get(field or "")
+        return x if isinstance(x, Measure) else None
+
+    def dimension_by_field(self, field: str | None) -> Dimension | None:
+        x = self.by_field.get(field or "")
+        return x if isinstance(x, Dimension) else None
+
+    def resolve_measure(self, span: str) -> Measure | None:
+        n = _norm(span)
+        if n in self.measure_index:
+            return self.measure_index[n]
+        # strip leading qualifiers the model sometimes includes ("open queries" -> "queries")
+        words = n.split()
+        for i in range(1, len(words)):
+            tail = " ".join(words[i:])
+            if tail in self.measure_index:
+                return self.measure_index[tail]
+        return _fuzzy(n, self.measure_index) or _fuzzy(_singular(n), self.measure_index)
+
+    def resolve_dimension(self, span: str) -> Dimension | None:
+        n = _norm(span)
+        for cand in (n, _singular(n), re.sub(r"^(each|every|per|by)\s+", "", n)):
+            if cand in self.dim_index:
+                return self.dim_index[cand]
+        return _fuzzy(n, self.dim_index)
+
+    def canonical_value(self, dim: Dimension, span: str) -> str:
+        n = _norm(span)
+        return next((v for v in dim.values if _norm(v) == n), span.strip())
+
+    def resolve_filter_value(self, span: str, context: list[str] | None = None) -> tuple[Dimension | None, str]:
+        """Map a filter value span ("germany", "site 104") to (dimension, canonical value).
+
+        ``context`` holds a few words that preceded the span ("for the study ..."),
+        which helps place values that are not in the catalog.
+        """
+        n = _norm(span)
+        if n in self.value_index:
+            dim = self.value_index[n]
+            return dim, self.canonical_value(dim, span)
+        for dim in self.dimensions:
+            if dim.value_pattern and re.match(dim.value_pattern, n):
+                return dim, span.strip().title() if dim.key == "site" else span.strip().upper()
+        # "<dimension word> <value>", e.g. "CRA Smith" or "arm C"
+        words = n.split()
+        for i in range(len(words) - 1, 0, -1):
+            head = " ".join(words[:i])
+            if head in self.dim_index:
+                return self.dim_index[head], " ".join(span.split()[i:])
+        if context:
+            for w in reversed(context):
+                d = self.dim_index.get(_norm(w)) or self.dim_index.get(_singular(_norm(w)))
+                if d:
+                    return d, span.strip()
+        fuzzy = _fuzzy(n, self.value_index, cutoff=0.85)
+        if fuzzy:
+            return fuzzy, span.strip()
+        return None, span.strip()
+
+    def default_time_axis(self) -> Dimension | None:
+        """The axis a trend chart gets when the request names none: Month if there is one, else the first date
+        column."""
+        times = [d for d in self.dimensions if d.is_time]
+        return next((d for d in times if "month" in _norm(d.display)), times[0] if times else None)
+
+    def geo_dimensions(self) -> list[Dimension]:
+        return [d for d in self.dimensions if d.is_geo]
+
+    # -- import / export --------------------------------------------------
+    ROW_KINDS = ("Measure", "Column", "Date column", "Location column")
+    AGG_CHOICES = ("count", "sum", "average", "median", "max", "min", "distinct_count")
+
+    def to_rows(self) -> list[dict]:
+        rows = []
+        for m in self.measures:
+            rows.append({"Kind": "Measure", "Field": m.field, "Also called": ", ".join(m.synonyms),
+                         "Values": "", "Default aggregation": m.default_agg})
+        for d in self.dimensions:
+            kind = "Date column" if d.is_time else "Location column" if d.is_geo else "Column"
+            rows.append({"Kind": kind, "Field": d.field, "Also called": ", ".join(d.synonyms),
+                         "Values": ", ".join(d.values), "Default aggregation": ""})
+        return rows
+
+    @classmethod
+    def from_rows(cls, rows: list[dict], name: str = "My data model") -> tuple[Catalog, list[str]]:
+        """Build a catalog from table rows (Kind, Field, Also called, Values, Default aggregation).
+
+        Returns the catalog and a list of problems (rows skipped and why). Field names must be ``Table[Column]``, as
+        they appear in Power BI; synonyms are added automatically from each field's name."""
+        measures: list[Measure] = []
+        dims: list[Dimension] = []
+        problems: list[str] = []
+        seen: set[str] = set()
+        for i, r in enumerate(rows, 1):
+            field = str(r.get("Field") or "").strip()
+            if not field:
+                continue
+            parts = split_field(field)
+            if not parts:
+                problems.append(f"Row {i}: '{field}' is not in Table[Column] form, e.g. Sales[Revenue].")
+                continue
+            table, col = parts
+            field = f"{table}[{col}]"
+            if field in seen:
+                problems.append(f"Row {i}: {field} is listed twice; the first one is kept.")
+                continue
+            seen.add(field)
+            kind = str(r.get("Kind") or "Column").strip().lower()
+            also = [a.strip() for a in re.split(r"[,;\n]", str(r.get("Also called") or "")) if a.strip()]
+            values = [v.strip() for v in re.split(r"[,;\n]", str(r.get("Values") or "")) if v.strip()]
+            key = re.sub(r"\W+", "_", field.lower()).strip("_")
+            if kind.startswith("measure"):
+                agg = str(r.get("Default aggregation") or "").strip().lower() or "sum"
+                if agg not in cls.AGG_CHOICES:
+                    problems.append(f"Row {i}: unknown aggregation '{agg}' for {field}; using sum.")
+                    agg = "sum"
+                syn = list(dict.fromkeys([*also, *auto_synonyms(col)]))
+                unit = "percent" if re.search(r"%|percent|rate", col, re.IGNORECASE) else "count"
+                measures.append(Measure(key, col, field, agg, syn, unit=unit))
+            else:
+                is_time = kind.startswith("date")
+                syn = list(dict.fromkeys([*also, *auto_synonyms(col, is_time)]))
+                dims.append(Dimension(key, col, field, syn, values=values, is_time=is_time,
+                                      is_geo=kind.startswith("location")))
+        if not measures:
+            problems.append("Add at least one measure (something to count or add up).")
+        return cls(measures, dims, name=name), problems
+
+    def fingerprint(self) -> str:
+        import hashlib
+        import json
+
+        blob = json.dumps([self.name, self.to_rows()], sort_keys=True)
+        return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+    def prompt_text(self) -> str:
+        """The catalog as the AI reader sees it."""
+        lines = ["Measures (things to count or add up):"]
+        for m in self.measures:
+            lines.append(f"- {m.field}: also called {', '.join(m.synonyms[:8])}; default aggregation {m.default_agg}")
+        lines.append("Columns (to group by, split by or filter on):")
+        for d in self.dimensions:
+            tag = " [date]" if d.is_time else " [location]" if d.is_geo else ""
+            vals = f"; example values: {', '.join(d.values[:12])}" if d.values else ""
+            lines.append(f"- {d.field}{tag}: also called {', '.join(d.synonyms[:8])}{vals}")
+        return "\n".join(lines)
 
 
 def _fuzzy(text: str, index: dict, cutoff: float = 0.82):
@@ -170,53 +360,18 @@ def _fuzzy(text: str, index: dict, cutoff: float = 0.82):
     return index[match[0]] if match else None
 
 
+DEFAULT = Catalog(MEASURES, DIMENSIONS, date_field=DATE_FIELD)
+DIM_BY_KEY = {d.key: d for d in DIMENSIONS}
+MEASURE_BY_KEY = {m.key: m for m in MEASURES}
+
+
 def resolve_measure(span: str) -> Measure | None:
-    n = _norm(span)
-    if n in _MEASURE_INDEX:
-        return _MEASURE_INDEX[n]
-    # strip leading qualifiers the model sometimes includes ("open queries" -> "queries")
-    words = n.split()
-    for i in range(1, len(words)):
-        tail = " ".join(words[i:])
-        if tail in _MEASURE_INDEX:
-            return _MEASURE_INDEX[tail]
-    return _fuzzy(n, _MEASURE_INDEX) or _fuzzy(_singular(n), _MEASURE_INDEX)
+    return DEFAULT.resolve_measure(span)
 
 
 def resolve_dimension(span: str) -> Dimension | None:
-    n = _norm(span)
-    for cand in (n, _singular(n), re.sub(r"^(each|every|per|by)\s+", "", n)):
-        if cand in _DIM_INDEX:
-            return _DIM_INDEX[cand]
-    return _fuzzy(n, _DIM_INDEX)
+    return DEFAULT.resolve_dimension(span)
 
 
 def resolve_filter_value(span: str, context: list[str] | None = None) -> tuple[Dimension | None, str]:
-    """Map a filter value span ("germany", "site 104") to (dimension, canonical value).
-
-    ``context`` holds a few words that preceded the span ("for the study ..."),
-    which helps place values that are not in the catalog.
-    """
-    n = _norm(span)
-    if n in _VALUE_INDEX:
-        dim = _VALUE_INDEX[n]
-        canonical = next(v for v in dim.values if _norm(v) == n)
-        return dim, canonical
-    for dim in DIMENSIONS:
-        if dim.value_pattern and re.match(dim.value_pattern, n):
-            return dim, span.strip().title() if dim.key == "site" else span.strip().upper()
-    # "<dimension word> <value>", e.g. "CRA Smith" or "arm C"
-    words = n.split()
-    for i in range(len(words) - 1, 0, -1):
-        head = " ".join(words[:i])
-        if head in _DIM_INDEX:
-            return _DIM_INDEX[head], " ".join(span.split()[i:])
-    if context:
-        for w in reversed(context):
-            d = _DIM_INDEX.get(_norm(w)) or _DIM_INDEX.get(_singular(_norm(w)))
-            if d:
-                return d, span.strip()
-    fuzzy = _fuzzy(n, _VALUE_INDEX, cutoff=0.85)
-    if fuzzy:
-        return fuzzy, span.strip()
-    return None, span.strip()
+    return DEFAULT.resolve_filter_value(span, context)

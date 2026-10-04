@@ -4,11 +4,16 @@
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ivis-fabcank6.streamlit.app)
 [![Model on Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Model-ivis--bert-yellow)](https://huggingface.co/FabcanK6/ivis-bert)
 
-**Turn plain-English dashboard requests into Power BI visual specs.**
+**Turn plain-English dashboard requests into Power BI visuals.**
 
 **[▶ Open the live app](https://ivis-fabcank6.streamlit.app)**
 
-Clinical stakeholders tend to ask for dashboards in loose terms, for example *"Can we get a chart of top queries by site?"*, and a BI developer then has to work out the chart type, measure, axis, filters and date window. iVIS does that step automatically. A fine-tuned BERT model reads the request and returns a structured, Power BI-ready spec plus a DevOps work item.
+Clinical stakeholders tend to ask for dashboards in loose terms, for example *"Can we get a chart of top queries by site?"*, and a BI developer then has to work out the chart type, measure, axis, filters and date window. iVIS does that step automatically. It reads the request and returns a structured, Power BI-ready spec, a **visual file you can drop into a Power BI report**, and a DevOps work item.
+
+- **Three ways to read a request:** a fine-tuned BERT model with keyword cues (fast and free, the default), an **AI reader** (Google Gemini, free tier) whose every answer is checked by code, or keywords only
+- **Your own data model:** describe your dataset's measures and columns in the app (or upload a CSV), and requests are mapped onto your fields; it is kept in your own browser
+- **Power BI visual file:** a PBIR `visual.json` with the visual type, fields, sort, title and filters, plus a short list of what to finish in Power BI
+- **Accuracy check in the app:** run any reader on the 2,000-request test set and see where it goes wrong
 
 ```text
 "Can we get a chart of the top 10 sites with the most open queries in Germany over the last 30 days?"
@@ -50,7 +55,10 @@ flowchart LR
     D --> F[Spec builder]
     E --> F
     G[(Semantic catalog<br/>measures · dimensions · values)] --> F
+    K[Keyword cues] -->|strong cue overrides chart| F
+    L[AI reader: Gemini] -->|parts + fields, checked by code| F
     F --> H[Power BI visual spec JSON]
+    F --> M[PBIR visual.json]
     F --> I[Azure DevOps work item]
     H --> J[Streamlit app]
 ```
@@ -64,8 +72,12 @@ iVIS treats the task as **joint intent classification + slot filling** (the "Joi
 | **Semantic catalog** (`ivis/catalog.py`) | Maps detected spans to real fields, e.g. "open queries" → `Queries[Query Count]` + filter `Queries[Status] = open`. |
 | **Spec builder** (`ivis/spec.py`) | Normalizes time windows into Power BI relative-date filters, resolves top-N and sort, applies chart-specific defaults (a line chart with no axis gets `Date[Month]`), fills the visual's field wells and lists anything it couldn't resolve under `warnings`. |
 | **Rule baseline** (`ivis/rules.py`) | The original keyword/lexicon parser. Used as a baseline for evaluation and as a fallback when there's no trained checkpoint. |
+| **Hybrid reader** (`ivis/predict.py`) | BERT's word tags, but a *strong* chart cue in the request ("split by", "headline", "donut", "crosstab") decides the chart. Each strong cue was checked on the validation split (1,302 hits, all correct); weak cues such as "how many" or "percentage" never override BERT. |
+| **AI reader** (`ivis/ai.py`, `ivis/llm.py`) | Gemini returns the chart type and each part of the request with the exact words and the field it chose from the data model. Code drops any part whose words are not in the request and ignores any field that is not in the data model (or is the wrong kind), then the same spec builder runs. Answers are cached for a day; the client falls back across free models and skips models whose daily quota is spent. |
+| **Visual file** (`ivis/pbir.py`) | Writes the spec as a PBIR `visual.json`: visual type, fields per role, sort, title and categorical filters. Relative date windows and top N are listed for the user to add in Power BI. |
+| **Benchmark** (`ivis/benchmark.py`) | Rebuilds the standard test split and scores any reader, including a *same visual* score that compares the visuals built from the reading and from the labels. |
 
-The model only decides *what was asked for*, and the catalog decides *which fields that means*. To point iVIS at your own dataset, edit the catalog and retrain. The model architecture doesn't change.
+The reader only decides *what was asked for*, and the catalog decides *which fields that means*. To point iVIS at your own dataset, describe it in the app's **Data model** tab (or build a `Catalog` with `Catalog.from_rows`). The keyword and AI readers use it directly; BERT learned the built-in model's wording, so with a very different dataset the AI reader maps requests best.
 
 ---
 
@@ -87,6 +99,8 @@ streamlit run app/streamlit_app.py
 # command line (uses the BERT model in models/ivis-bert if present, otherwise the rule parser)
 python -m ivis.cli "how many screen failures do we have at Site 104 since January?"
 python -m ivis.cli --format devops "protocol deviations by country broken down by category in 2025"
+python -m ivis.cli --format visual "share of SAEs by country this year" > visual.json      # Power BI visual file
+GEMINI_API_KEY=... python -m ivis.cli --backend ai "how fast do queries close by site?"     # AI reader
 ```
 
 **Train the BERT model:**
@@ -170,7 +184,9 @@ Test set: 2,000 requests. Half use phrasings seen during training; the other hal
 - **BERT partly memorizes phrasing.** It is near perfect on familiar wording (chart acc. 0.999, slot F1 1.000) but drops to 0.853 chart accuracy on unseen wording, below the rule baseline. Most of those misses are stacked bars ("X per Y split by Z" read as a plain bar, 0.48) and cards (0.85).
 - **Some errors come from the labels, not the model.** For example, "total" is tagged as an aggregation in some templates but not in "contribution to total", and "over time" is never tagged as a time axis.
 
-**Next improvements:** more varied phrasing in the generator, fixing label inconsistencies, falling back to rule-based chart cues when BERT is unsure, and evaluating on real stakeholder requests.
+**What changed since:** the "contribution to total" label was fixed (the rule baseline now scores slot F1 0.904 and exact frame match 0.638 on the same 2,000 requests), and the hybrid and AI readers were added to address the unseen-wording drop. The app's **Accuracy check** tab measures every reader on this test set, including the *same visual* score.
+
+**Next improvements:** more varied phrasing in the generator, evaluating on real stakeholder requests, and retraining BERT on the corrected labels.
 
 > Synthetic data overstates real-world accuracy. Before relying on these numbers, evaluate on a small hand-labelled set of real requests.
 
@@ -225,7 +241,7 @@ print(to_markdown(spec))
 ivis/
 ├── ivis/
 │   ├── schema.py          # chart types, slot labels, Power BI visual names
-│   ├── catalog.py         # semantic model: measures, dimensions, values → Power BI fields
+│   ├── catalog.py         # data model (Catalog): measures, dimensions, values → Power BI fields; built-in + your own
 │   ├── text.py            # word tokenizer + BIO helpers
 │   ├── data/
 │   │   ├── templates.py   # request templates per chart type
@@ -237,9 +253,13 @@ ivis/
 │   ├── predict.py         # BertParser / RuleBasedParser → spec
 │   ├── spec.py            # spans → Power BI spec (time, top-N, sort, defaults, field wells)
 │   ├── devops.py          # spec → Azure DevOps work item / markdown
-│   ├── rules.py           # keyword baseline
+│   ├── rules.py           # keyword baseline + chart cues (strong cues used by the hybrid reader)
+│   ├── ai.py              # AI reader: Gemini's answer checked against the request and the data model
+│   ├── llm.py             # Gemini client (standard library; model fallback, quota memory)
+│   ├── pbir.py            # spec → Power BI PBIR visual.json
+│   ├── benchmark.py       # standard test split + "same visual" scoring for any reader
 │   └── cli.py             # `python -m ivis.cli "..."`
-├── app/streamlit_app.py   # UI: preview with mock data, spec JSON, DevOps ticket, span highlighting
+├── app/streamlit_app.py   # UI: request → preview, visual file, ticket, spec; Data model tab; Accuracy check tab
 ├── .streamlit/config.toml # app settings
 ├── notebooks/train_on_colab.ipynb
 ├── scripts/train_bert.sh
@@ -259,6 +279,8 @@ Run the tests with `pytest` or `python -m unittest discover -s tests`.
 | Live app | [ivis-fabcank6.streamlit.app](https://ivis-fabcank6.streamlit.app) on Streamlit Community Cloud; redeploys on every push to `main` |
 | Model | [FabcanK6/ivis-bert](https://huggingface.co/FabcanK6/ivis-bert) on the Hugging Face Hub, downloaded by the app on cold start |
 | CI | GitHub Actions: lint, unit tests and a baseline evaluation on every push |
+| AI reader | Optional: add `GEMINI_API_KEY` to the app's Streamlit secrets (a free key from Google AI Studio). Each browser session can make 30 new AI readings on the shared key |
+| Data models | A user's own data model is stored in their browser (`localStorage`), never on the server |
 | Fallback | If the model can't be loaded, the app serves the rule-based parser and shows which parser answered |
 
 ---
@@ -267,10 +289,13 @@ Run the tests with `pytest` or `python -m unittest discover -s tests`.
 
 - [ ] Evaluate on a hand-labelled set of real requests
 - [ ] More varied phrasing and consistent labels in the generator
-- [ ] Hybrid parser: keyword rules can override BERT's chart choice; calibrated confidence
-- [ ] Optional LLM mode, compared with BERT on the same test set
+- [x] Hybrid parser: strong keyword cues override BERT's chart choice
+- [x] Optional AI (LLM) mode, compared with BERT on the same test set (Accuracy check tab)
+- [x] Bring your own data model
+- [x] Generate a Power BI visual file (PBIR `visual.json`) from the spec
 - [ ] Feedback capture in the app → corrected specs become training data
-- [ ] Generate Power BI report JSON (PBIR `visual.json`) directly from the spec
+- [ ] Retrain BERT on the corrected labels and more varied phrasing
+- [ ] Relative date and top N filters inside the visual file
 
 ## License
 

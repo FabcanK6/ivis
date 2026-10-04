@@ -29,6 +29,7 @@ class Span:
     start: int  # word index, inclusive
     end: int    # word index, exclusive
     text: str
+    field: str | None = None  # a Power BI field chosen by the AI reader (checked against the catalog later)
 
     def as_tuple(self) -> tuple[str, int, int]:
         return (self.label, self.start, self.end)
@@ -38,7 +39,7 @@ def bio_to_spans(tokens: list[str], tags: list[str]) -> list[Span]:
     """Decode BIO tags into spans. A stray ``I-X`` is treated as the start of a span."""
     spans: list[Span] = []
     cur_label, cur_start = None, None
-    for i, tag in enumerate(tags + ["O"]):
+    for i, tag in enumerate([*tags, "O"]):
         prefix, _, label = tag.partition("-")
         continues = prefix == "I" and label == cur_label
         if cur_label is not None and not continues:

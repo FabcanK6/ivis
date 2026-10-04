@@ -1,8 +1,10 @@
 """Turn (chart type, labelled spans) into a Power BI visual spec.
 
 This layer is deterministic: the model decides *what* was asked for, and this
-module maps it onto the semantic model in :mod:`ivis.catalog`, fills sensible
-defaults, and records anything it could not resolve under ``warnings``.
+module maps it onto the active data model (:class:`ivis.catalog.Catalog`), fills
+sensible defaults, and records anything it could not resolve under ``warnings``.
+A span may carry a ``field`` chosen by the AI reader; it is used only if that
+field really is in the data model.
 """
 
 from __future__ import annotations
@@ -33,10 +35,10 @@ def _to_int(tok: str) -> int | None:
 # ---------------------------------------------------------------------------
 # Slot normalizers
 # ---------------------------------------------------------------------------
-def parse_time(phrase: str) -> dict:
+def parse_time(phrase: str, date_field: str | None = catalog.DATE_FIELD) -> dict:
     """Normalize a time phrase into a Power BI-style relative/absolute date filter."""
     p = phrase.lower().strip()
-    out: dict = {"text": phrase, "field": catalog.DATE_FIELD}
+    out: dict = {"text": phrase, "field": date_field}
 
     m = re.search(r"(?:last|past|previous|trailing)\s+(\w+)\s+(day|week|month|quarter|year)s?", p)
     if m and _to_int(m.group(1)):
@@ -119,7 +121,9 @@ def build_spec(
     spans: list[Span],
     chart_confidence: float | None = None,
     chart_alternatives: list[tuple[str, float]] | None = None,
+    cat: catalog.Catalog | None = None,
 ) -> dict:
+    cat = cat or catalog.DEFAULT
     warnings: list[str] = []
     measures: list[dict] = []
     group_by: list[dict] = []
@@ -134,7 +138,7 @@ def build_spec(
         if sp.label == "AGG":
             pending_agg = parse_agg(sp.text)
         elif sp.label == "METRIC":
-            m = catalog.resolve_measure(sp.text)
+            m = cat.measure_by_field(sp.field) or cat.resolve_measure(sp.text)
             if m is None:
                 warnings.append(f"Unknown measure '{sp.text}' - add it to the catalog or map it manually.")
                 measures.append({"name": sp.text, "field": None, "aggregation": pending_agg or "count",
@@ -144,7 +148,7 @@ def build_spec(
                                  "unit": m.unit, "source_span": sp.text})
             pending_agg = None
         elif sp.label in ("GROUP_BY", "SERIES"):
-            d = catalog.resolve_dimension(sp.text)
+            d = cat.dimension_by_field(sp.field) or cat.resolve_dimension(sp.text)
             target = group_by if sp.label == "GROUP_BY" else series
             if d is None:
                 warnings.append(f"Unknown dimension '{sp.text}'.")
@@ -153,7 +157,11 @@ def build_spec(
                 target.append({"name": d.display, "field": d.field, "source_span": sp.text})
         elif sp.label == "FILTER":
             context = tokens[max(0, sp.start - 3):sp.start]
-            d, value = catalog.resolve_filter_value(sp.text, context)
+            hinted = cat.dimension_by_field(sp.field)
+            if hinted:
+                d, value = hinted, cat.canonical_value(hinted, sp.text)
+            else:
+                d, value = cat.resolve_filter_value(sp.text, context)
             key = d.field if d else f"?{sp.text}"
             if d is None:
                 warnings.append(f"Could not tell which field the filter value '{sp.text}' belongs to.")
@@ -162,7 +170,9 @@ def build_spec(
             if value not in f["values"]:
                 f["values"].append(value)
         elif sp.label == "TIME":
-            time_filter = parse_time(sp.text)
+            time_filter = parse_time(sp.text, cat.date_field)
+            if not cat.date_field:
+                warnings.append("The data model has no date column, so the time window can't be applied.")
             if time_filter["filterType"] == "Unresolved":
                 warnings.append(f"Time window '{sp.text}' needs a manual date range.")
         elif sp.label == "TOPN":
@@ -177,16 +187,23 @@ def build_spec(
     if not measures:
         warnings.append("No measure detected; defaulting to a count of records.")
         measures.append({"name": "Record Count", "field": None, "aggregation": "count", "source_span": None})
-    if chart_type in ("line", "area") and not any(
-        g["field"] and g["field"].startswith("Date[") for g in group_by
-    ):
-        if group_by:
-            series = series or group_by
-        group_by = [{"name": "Month", "field": "Date[Month]", "source_span": None, "defaulted": True}]
+    time_fields = {d.field for d in cat.dimensions if d.is_time}
+    axis = cat.default_time_axis()
+    if chart_type in ("line", "area") and not any(g["field"] in time_fields for g in group_by):
+        if axis:
+            if group_by:
+                series = series or group_by
+            group_by = [{"name": axis.display, "field": axis.field, "source_span": None, "defaulted": True}]
+        else:
+            warnings.append("A trend chart needs a date axis, and the data model has no date column.")
     if chart_type == "map":
-        geo = [g for g in group_by if g["field"] in ("Site[Country]", "Site[Region]")]
-        if not geo:
-            group_by = [{"name": "Country", "field": "Site[Country]", "source_span": None, "defaulted": True}]
+        geo_fields = [d for d in cat.geo_dimensions()]
+        if not any(g["field"] in {d.field for d in geo_fields} for g in group_by):
+            if geo_fields:
+                group_by = [{"name": geo_fields[0].display, "field": geo_fields[0].field, "source_span": None,
+                             "defaulted": True}]
+            else:
+                warnings.append("A map needs a location column, and the data model has none.")
     if chart_type in ("pie", "donut", "bar", "stacked_bar", "matrix") and not group_by:
         warnings.append(f"A {chart_type} chart needs a category; none was found in the request.")
     if chart_type == "scatter" and len(measures) < 2:
@@ -248,6 +265,7 @@ def build_spec(
             "alternatives": [{"chart_type": c, "p": round(float(p), 4)} for c, p in (chart_alternatives or [])],
         },
         "spans": [{"label": s.label, "text": s.text, "start": s.start, "end": s.end} for s in spans],
+        "data_model": cat.name,
         "warnings": warnings,
     }
 
