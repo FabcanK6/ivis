@@ -120,8 +120,8 @@ class AIParser:
             role, said = part.get("role"), str(part.get("text") or "").strip()
             if role not in ROLES or not said:
                 continue
-            if role == "time" and _NOT_A_WINDOW.fullmatch(said.lower()):
-                continue  # "over time" says the chart is a trend; it is not a period to filter on
+            if role in ("time", "axis") and _NOT_A_WINDOW.fullmatch(said.lower()):
+                continue  # "over time" says the chart is a trend; it is neither a period nor a date grain
             loc = _locate(tokens, said, used)
             if loc is None:
                 notes.append(f'The AI read "{said}" as the {role.replace("_", " ")}, but those words are not in the '
@@ -138,11 +138,24 @@ class AIParser:
                     field = None
             elif role not in FIELD_ROLES:
                 field = None
+            if role == "filter":
+                loc = self._value_only(tokens, loc, field)  # "CRA Smith" -> "Smith" when the column is CRA Name
             used |= set(range(*loc))
             spans.append(Span(ROLES[role], loc[0], loc[1], " ".join(tokens[loc[0]:loc[1]]), field))
         spans.sort(key=lambda s: s.start)
         return {"tokens": tokens, "spans": spans, "tags": spans_to_bio(len(tokens), [s.as_tuple() for s in spans]),
                 "chart_type": chart, "chart_confidence": None, "chart_alternatives": [], "notes": notes}
+
+    def _value_only(self, tokens: list[str], loc: tuple[int, int], field: str | None) -> tuple[int, int]:
+        """Drop a leading column word from a filter value ("CRA Smith" filtered on CRA Name is "Smith")."""
+        dim = self.cat.dimension_by_field(field)
+        if dim is None or loc[1] - loc[0] < 2:
+            return loc
+        names = {catalog._norm(n) for n in [dim.display, *dim.synonyms]}
+        for k in range(loc[1] - 1, loc[0], -1):
+            if catalog._norm(" ".join(tokens[loc[0]:k])) in names:
+                return k, loc[1]
+        return loc
 
     def predict(self, text: str) -> dict:
         pred = self.check(text, self.ask(text))

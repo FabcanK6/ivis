@@ -140,6 +140,13 @@ class TestAIReader(unittest.TestCase):
             {"role": "measure", "text": "SAEs", "field": "Safety[SAE Count]"},
             {"role": "time", "text": "over time"}]})).parse("trend of SAEs over time")
         self.assertIsNone(trend["time_filter"])  # "over time" is not a period
+        trend = AIParser(FakeAI({"chart_type": "line", "parts": [
+            {"role": "measure", "text": "SAEs", "field": "Safety[SAE Count]"},
+            {"role": "axis", "text": "time", "field": "Date[Date]"},
+            {"role": "filter", "text": "CRA Smith", "field": "Monitoring[CRA Name]"}]})).parse(
+                "trend of SAEs over time for CRA Smith")
+        self.assertEqual(trend["group_by"][0]["field"], "Date[Month]")  # "time" is not a date grain
+        self.assertEqual(trend["filters"][0]["values"], ["Smith"])
         self.assertEqual(trend["group_by"][0]["field"], "Date[Month]")
 
 
