@@ -15,6 +15,7 @@ Power BI spec whichever reader was used.
 from __future__ import annotations
 
 import json
+import re
 
 from ivis import catalog
 from ivis.schema import CHART_TYPES
@@ -71,9 +72,15 @@ parts: every part of the request, in the order it appears. Each part has:
 
 Never add words that are not in the request. A request may have no time window, filter or legend: leave them out.
 A scatter plot has two measures.
+"over time", "trend" and "tracking" are not time windows: leave them out. A time grain such as "monthly", "by
+week" or "per quarter" is the axis (a date column), not a time window. A time window names a period: "last 30
+days", "this quarter", "in 2025", "since January", "YTD".
 
 Data model:
 """
+
+
+_NOT_A_WINDOW = re.compile(r"(?:over |across )?(?:the )?time|over time|trend|overall|ever|to date")
 
 
 def _locate(tokens: list[str], text: str, used: set[int]) -> tuple[int, int] | None:
@@ -113,6 +120,8 @@ class AIParser:
             role, said = part.get("role"), str(part.get("text") or "").strip()
             if role not in ROLES or not said:
                 continue
+            if role == "time" and _NOT_A_WINDOW.fullmatch(said.lower()):
+                continue  # "over time" says the chart is a trend; it is not a period to filter on
             loc = _locate(tokens, said, used)
             if loc is None:
                 notes.append(f'The AI read "{said}" as the {role.replace("_", " ")}, but those words are not in the '

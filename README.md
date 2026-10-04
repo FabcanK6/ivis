@@ -171,8 +171,9 @@ Test set: 2,000 requests. Half use phrasings seen during training; the other hal
 | Keywords only (`ivis/rules.py`) | 94.5% | 73.0% | 95.6% | **76.0%** | 0.904 | 63.8% |
 | BERT only (`bert-base-uncased`, 4 epochs) | 92.6% | 83.4% | 85.3% | 66.8% | **0.962** | 83.0% |
 | **BERT + keyword cues** (default) | **99.6%** | **85.1%** | **99.4%** | 70.5% | **0.962** | **84.8%** |
+| AI (Gemini Flash, fixed sample of 40) | 95.0% | 77.5% | 90.0% | 65.0% | n/a | n/a |
 
-*Same visual* means the Power BI visual built from the reading matches the one built from the labels (chart, measures, axis, legend, filters, time window, top N). The AI reader is scored on a fixed sample in the same tab once a Gemini key is set.
+*Same visual* means the Power BI visual built from the reading matches the one built from the labels (chart, measures, axis, legend, filters, time window, top N). The AI reader is scored on a fixed sample of 40 (half new wording) because each request uses free AI quota; most of its misses were trend requests where it treated "over time" as a time window, which the AI instructions and a code check now rule out. Its strength is elsewhere: it maps wording that is not in the data model's synonyms (live example: "how fast are queries getting closed" → `Queries[Days Open]`) and it reads a user's own data model.
 
 - **Strong chart cues close BERT's chart gap.** On new wording BERT picked the right chart 85.3% of the time; with the cues it is 99.4% (and 99.6% overall).
 - **The label fix mattered.** With "contribution to total" labelled consistently, BERT's exact frame match is 83.0% (it was 79.6% against the old labels) and its slot F1 0.962.

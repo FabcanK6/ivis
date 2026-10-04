@@ -38,6 +38,9 @@ def sample(rows: list[dict], n: int, seed: int = 7) -> list[dict]:
     return rng.sample(seen, min(n // 2, len(seen))) + rng.sample(unseen, min(n - n // 2, len(unseen)))
 
 
+PARTS = ("chart", "measures", "axis", "legend", "filters", "time window", "top N")
+
+
 def visual_key(spec: dict) -> tuple:
     t = spec.get("time_filter") or {}
     return (
@@ -60,17 +63,33 @@ def pred_spec(row: dict, pred: dict, cat: catalog.Catalog | None = None) -> dict
     return build_spec(row["text"], pred["tokens"], pred["chart_type"], spans, cat=cat)
 
 
+def _show(value) -> str:
+    if value in ((), None, ""):
+        return "none"
+    if isinstance(value, tuple):
+        return ", ".join(_show(v) for v in value)
+    return str(value)
+
+
+def differences(gold: tuple, got: tuple) -> str:
+    """Which parts of two visuals differ, e.g. "axis: Site[Site Name] → Site[Country]"."""
+    return "; ".join(f"{name}: {_show(a)} → {_show(b)}" for name, a, b in zip(PARTS, gold, got) if a != b)
+
+
 def score(rows: list[dict], preds: list[dict]) -> dict:
     report = evaluate_predictions(rows, preds)
-    same = [visual_key(gold_spec(r)) == visual_key(pred_spec(r, p)) for r, p in zip(rows, preds)]
+    keys = [(visual_key(gold_spec(r)), visual_key(pred_spec(r, p))) for r, p in zip(rows, preds)]
+    same = [g == k for g, k in keys]
     report["same_visual"] = sum(same) / len(same) if same else 0.0
     for flag, name in ((False, "seen_templates"), (True, "unseen_templates")):
         idx = [i for i, r in enumerate(rows) if bool(r.get("unseen_template")) == flag]
         if idx and name in report:
             report[name]["same_visual"] = sum(same[i] for i in idx) / len(idx)
     report["misses"] = [
-        {"request": r["text"], "expected": r["chart_type"], "got": p["chart_type"],
-         "unseen_wording": bool(r.get("unseen_template"))}
-        for r, p, ok in zip(rows, preds, same) if not ok
+        {"request": r["text"], "what differs (expected → got)": differences(*k),
+         "new wording": bool(r.get("unseen_template"))}
+        for r, k, ok in zip(rows, keys, same) if not ok
     ]
+    report["differs_by_part"] = {
+        name: sum(1 for (g, k), ok in zip(keys, same) if not ok and g[i] != k[i]) for i, name in enumerate(PARTS)}
     return report

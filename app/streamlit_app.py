@@ -512,6 +512,8 @@ def accuracy_tab() -> None:
                            "ivis_accuracy.json", "application/json")
         for rep in results:
             with st.expander(f"{READERS[rep['reader']]}: {len(rep['misses'])} requests with a different visual"):
+                parts = sorted(rep.get("differs_by_part", {}).items(), key=lambda x: -x[1])
+                st.caption("Parts that differed: " + ", ".join(f"{k} {v}" for k, v in parts if v))
                 st.dataframe(pd.DataFrame(rep["misses"][:200]), hide_index=True, width="stretch")
 
 

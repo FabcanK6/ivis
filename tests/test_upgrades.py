@@ -136,6 +136,11 @@ class TestAIReader(unittest.TestCase):
         self.assertEqual(sum("not a" in w for w in spec["warnings"]), 2)
         bad = AIParser(FakeAI({"chart_type": "sunburst", "parts": []})).parse("SAEs")
         self.assertEqual(bad["chart_type"], "bar")
+        trend = AIParser(FakeAI({"chart_type": "line", "parts": [
+            {"role": "measure", "text": "SAEs", "field": "Safety[SAE Count]"},
+            {"role": "time", "text": "over time"}]})).parse("trend of SAEs over time")
+        self.assertIsNone(trend["time_filter"])  # "over time" is not a period
+        self.assertEqual(trend["group_by"][0]["field"], "Date[Month]")
 
 
 class TestPowerBIFile(unittest.TestCase):
@@ -170,6 +175,9 @@ class TestBenchmark(unittest.TestCase):
         rows = test_split()[:60]
         rep = score(rows, [{"tokens": r["tokens"], "tags": r["tags"], "chart_type": r["chart_type"]} for r in rows])
         self.assertEqual((rep["same_visual"], rep["frame_exact_match"]), (1.0, 1.0))
+        wrong = [{"tokens": r["tokens"], "tags": ["O"] * len(r["tokens"]), "chart_type": "card"} for r in rows]
+        miss = score(rows, wrong)["misses"][0]["what differs (expected → got)"]
+        self.assertIn("chart: ", miss)
         self.assertEqual(visual_key(gold_spec(rows[0])), visual_key(gold_spec(rows[0])))
         import random
 
