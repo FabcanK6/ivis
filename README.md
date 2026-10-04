@@ -164,7 +164,21 @@ Each row looks like this:
 
 ## Results
 
-Test set: 2,000 requests. Half use phrasings seen during training; the other half come from 10 held-out templates the model never saw.
+Test set: 2,000 requests. Half use phrasings seen during training; the other half come from 10 held-out templates the model never saw. Measured on the live app's **Accuracy check** tab, with the corrected labels.
+
+| Reader | Chart type right | Same visual | New wording: chart right | New wording: same visual | Slot micro-F1 | Exact frame match |
+|---|---|---|---|---|---|---|
+| Keywords only (`ivis/rules.py`) | 94.5% | 73.0% | 95.6% | **76.0%** | 0.904 | 63.8% |
+| BERT only (`bert-base-uncased`, 4 epochs) | 92.6% | 83.4% | 85.3% | 66.8% | **0.962** | 83.0% |
+| **BERT + keyword cues** (default) | **99.6%** | **85.1%** | **99.4%** | 70.5% | **0.962** | **84.8%** |
+
+*Same visual* means the Power BI visual built from the reading matches the one built from the labels (chart, measures, axis, legend, filters, time window, top N). The AI reader is scored on a fixed sample in the same tab once a Gemini key is set.
+
+- **Strong chart cues close BERT's chart gap.** On new wording BERT picked the right chart 85.3% of the time; with the cues it is 99.4% (and 99.6% overall).
+- **The label fix mattered.** With "contribution to total" labelled consistently, BERT's exact frame match is 83.0% (it was 79.6% against the old labels) and its slot F1 0.962.
+- **What is left is in the parts, not the chart.** On new wording, BERT-based readers still build the same visual less often than keywords (70.5% vs 76.0%): some parts of unfamiliar phrasings are tagged differently. Retraining on more varied phrasing is the next step.
+
+The first published results (before the label fix and the new readers):
 
 | Parser | Chart-type acc. | Slot micro-F1 | Exact frame match | Unseen phrasing (chart acc. / slot F1) |
 |---|---|---|---|---|
@@ -178,13 +192,11 @@ Test set: 2,000 requests. Half use phrasings seen during training; the other hal
 | Rules | 0.829 | 0.959 | 0.860 | 0.998 | 0.623 | 0.821 | 0.873 | 1.000 |
 | BERT | 0.886 | 1.000 | 0.898 | 0.996 | 0.801 | 1.000 | 0.999 | 1.000 |
 
-**What this shows**
+**What the first results showed**
 
 - **BERT is much better at pulling out the details.** Exact frame match rises from 60% to 80%. The biggest gains are in telling the axis apart from the legend (SERIES 0.62 → 0.80), time windows (0.87 → 1.00) and sort order (0.82 → 1.00).
 - **BERT partly memorizes phrasing.** It is near perfect on familiar wording (chart acc. 0.999, slot F1 1.000) but drops to 0.853 chart accuracy on unseen wording, below the rule baseline. Most of those misses are stacked bars ("X per Y split by Z" read as a plain bar, 0.48) and cards (0.85).
 - **Some errors come from the labels, not the model.** For example, "total" is tagged as an aggregation in some templates but not in "contribution to total", and "over time" is never tagged as a time axis.
-
-**What changed since:** the "contribution to total" label was fixed (the rule baseline now scores slot F1 0.904 and exact frame match 0.638 on the same 2,000 requests), and the hybrid and AI readers were added to address the unseen-wording drop. The app's **Accuracy check** tab measures every reader on this test set, including the *same visual* score.
 
 **Next improvements:** more varied phrasing in the generator, evaluating on real stakeholder requests, and retraining BERT on the corrected labels.
 
