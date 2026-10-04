@@ -310,6 +310,7 @@ Run the tests with `pytest` or `python -m unittest discover -s tests`.
 - [ ] Retrain BERT on the corrected labels and more varied phrasing
 - [ ] Relative date and top N filters inside the visual file
 
+
 ## License
 
 MIT © Fabian Msafiri
